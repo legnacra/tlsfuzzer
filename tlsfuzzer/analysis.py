@@ -32,6 +32,7 @@ mpl.use('Agg')
 
 
 _diffs = None
+_DATA = None
 
 
 def help_msg():
@@ -216,15 +217,23 @@ class Analysis(object):
             results[TestPair(index1, index2)] = result
         return results
 
+    @staticmethod
+    def _wilcox_test(pair):
+        global _DATA
+        index1, index2 = pair
+        data1 = _DATA.iloc[:, index1]
+        data2 = _DATA.iloc[:, index2]
+        _, pval = stats.wilcoxon(data1, data2)
+        return pval
+
     def wilcoxon_test(self):
         """Cross-test all classes with the Wilcoxon signed-rank test"""
-        results = {}
-        comb = combinations(list(range(len(self.class_names))), 2)
-        for index1, index2 in comb:
-            data1 = self.data.iloc[:, index1]
-            data2 = self.data.iloc[:, index2]
-            _, pval = stats.wilcoxon(data1, data2)
-            results[TestPair(index1, index2)] = pval
+        comb = list(combinations(list(range(len(self.class_names))), 2))
+        global _DATA
+        _DATA = self.data
+        with mp.Pool() as pool:
+            pvals = pool.map(self._wilcox_test, comb)
+        results = dict(zip(comb, pvals))
         return results
 
     def _calc_percentiles(self):
@@ -334,12 +343,7 @@ class Analysis(object):
 
         for _ in range(reps):
             boot = np.random.choice(diffs, replace=True, size=len(diffs))
-            # use trimmed mean as the pairing of samples in not perfect:
-            # the noise source could get activated in the middle of testing
-            # of the test set, causing some results to be unusable
-            # discard 50% of samples total (cut 25% from the median) to exclude
-            # non central modes
-            ret.append(stats.trim_mean(boot, 0.25))
+            ret.append(np.mean(boot, 0))
         return ret
 
     def _bootstrap_differences(self, pair, reps=5000):
@@ -369,12 +373,15 @@ class Analysis(object):
         :param int reps: how many bootstraping repetitions to perform
         :param float ci: confidence interval for the low and high estimate.
             0.95, i.e. "2 sigma", by default
-        :return: tuple with low estimate, median, and high estimate of
-            truncated mean of differences of observations
+        :return: tuple with low estimate, mean, and high estimate of
+            mean of differences of observations
         """
         cent_tend = self._bootstrap_differences(pair, reps)
+        mean = np.mean(self.data.iloc[:, pair.index1] -
+                       self.data.iloc[:, pair.index2])
 
-        return np.quantile(cent_tend, [(1-ci)/2, 0.5, 1-(1-ci)/2])
+        quant = np.quantile(cent_tend, [(1-ci)/2, 1-(1-ci)/2])
+        return [quant[0], mean, quant[1]]
 
     def conf_interval_plot(self):
         """Generate the confidence inteval for differences between samples."""
@@ -403,7 +410,7 @@ class Analysis(object):
         formatter = mpl.ticker.EngFormatter('s')
         ax.get_yaxis().set_major_formatter(formatter)
 
-        ax.set_title("Confidence intervals for truncated mean of differences")
+        ax.set_title("Confidence intervals for mean of differences")
         ax.set_xlabel("Class pairs")
         ax.set_ylabel("Mean of differences")
         canvas.print_figure(join(self.output, "conf_interval_plot.png"),
@@ -502,7 +509,7 @@ class Analysis(object):
             low, med, high = self.calc_diff_conf_int(worst_pair)
             # use 95% CI as that translates to 2 standard deviations, making
             # it easy to estimate higher CIs
-            txt = "Median difference: {:.5e}s, 95% CI: {:.5e}s, {:.5e}s"\
+            txt = "Mean difference: {:.5e}s, 95% CI: {:.5e}s, {:.5e}s"\
                 " (±{:.3e}s)".\
                 format(med, low, high, (high-low)/2)
             print(txt)
